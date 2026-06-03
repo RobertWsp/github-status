@@ -70,7 +70,8 @@ You never have to hand-edit TOML (though you can):
 |----------------------------------|-----------------------------------------------|
 | `ghs add owner/repo`             | Track a repo (accepts `@branch` and URLs)     |
 | `ghs add a/b c/d@main`           | Add several at once                           |
-| `ghs remove owner/repo`          | Stop tracking                                 |
+| `ghs remove owner/repo`          | Stop tracking a single repo                   |
+| `ghs remove owner`               | Stop tracking a **whole owner/company**       |
 | `ghs import --local [DIR]`       | Scan a folder for git clones with GitHub remotes |
 | `ghs import --me`                | Import your own GitHub repositories           |
 | `ghs import --user NAME`         | Import a user's public repos                  |
@@ -78,6 +79,12 @@ You never have to hand-edit TOML (though you can):
 | `ghs import … --dry-run`         | Preview without writing                       |
 
 All of these create the config on demand and de-duplicate automatically.
+
+You can also manage repositories **interactively inside the TUI** — press `d`
+to remove the selected repo, or `D` to remove every repo of its owner; a
+confirm prompt protects against mistakes and the change is saved to your
+config immediately. (Removing only affects your dashboard, never the repo on
+GitHub.)
 
 ## Configuration
 
@@ -132,9 +139,11 @@ Most users never set anything.
 | `/`                | Search (type to filter, Enter applies)  |
 | `f`                | Show only the selected owner/company    |
 | `c`                | Clear search & filters                  |
+| `d`                | Remove the selected repo (asks to confirm) |
+| `D`                | Remove ALL repos of the selected owner  |
 | `o` / `Enter`      | Open latest run in browser              |
 | `?`                | Toggle help                             |
-| `Esc`              | Exit search → clear filter → quit       |
+| `Esc`              | Cancel prompt → exit search → clear filter → quit |
 | `q` / `^C`         | Quit                                    |
 
 ## Architecture
@@ -152,8 +161,8 @@ Hexagonal (Ports & Adapters). Dependencies point **inward**; the pure
 | Module       | Responsibility                                                      |
 |--------------|---------------------------------------------------------------------|
 | `domain`     | Pure types & rules. SSoT for status semantics (`RunState`); `Project::parse`. |
-| `ports`      | The `StatusProvider` + `RepoDiscovery` traits the app depends on.   |
-| `adapters`   | octocrab provider (status + discovery) and a `LocalGitScanner` that reads `.git/config`. |
+| `ports`      | The `StatusProvider`, `RepoDiscovery` and `ProjectStore` traits the app depends on. |
+| `adapters`   | octocrab provider (status + discovery), a `LocalGitScanner` reading `.git/config`, and a `FileProjectStore` persisting the project list. |
 | `app`        | UI-agnostic state machine (`AppState`), actions, orchestration.     |
 | `tui`        | ratatui widgets + async runtime. `theme` is the SSoT for the palette. |
 | `cli`/`commands` | clap args + headless entry points (status / manage / import / doctor). |

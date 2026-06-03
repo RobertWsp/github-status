@@ -12,10 +12,13 @@
 
 use std::time::{Duration, Instant};
 
+use std::sync::Arc;
+
 use color_eyre::Result;
 use tokio::sync::mpsc;
 
 use crate::app::{Action, AppState, Command, StatusService};
+use crate::ports::ProjectStore;
 use crate::tui::{
     event::{Event, EventSource},
     keymap,
@@ -28,15 +31,22 @@ use crate::tui::{
 pub struct Runtime {
     state: AppState,
     service: StatusService,
+    store: Arc<dyn ProjectStore>,
     theme: Theme,
     auto_refresh: Option<Duration>,
 }
 
 impl Runtime {
-    pub fn new(state: AppState, service: StatusService, auto_refresh_secs: u64) -> Self {
+    pub fn new(
+        state: AppState,
+        service: StatusService,
+        store: Arc<dyn ProjectStore>,
+        auto_refresh_secs: u64,
+    ) -> Self {
         Self {
             state,
             service,
+            store,
             theme: Theme::default(),
             auto_refresh: (auto_refresh_secs > 0).then(|| Duration::from_secs(auto_refresh_secs)),
         }
@@ -86,7 +96,8 @@ impl Runtime {
     ) -> bool {
         match event {
             Event::Key(key) => {
-                let action = keymap::map_key(key, self.state.mode);
+                let confirming = self.state.pending_delete.is_some();
+                let action = keymap::map_key(key, self.state.mode, confirming);
                 if matches!(action, Action::Noop) {
                     return false;
                 }
@@ -127,9 +138,21 @@ impl Runtime {
                 // Best-effort; failure to open a browser must not crash the TUI.
                 let _ = open_in_browser(&url);
             }
+            Command::PersistProjects => self.persist_projects(),
             Command::Quit => {}
         }
         let _ = is_refresh;
+    }
+
+    /// Persist the current project list to the store. A failure surfaces as a
+    /// toast but never crashes the session.
+    fn persist_projects(&mut self) {
+        let projects = self.state.project_list();
+        if let Err(e) = self.store.save(&projects) {
+            self.state.toast = Some(crate::app::Toast::error(format!(
+                "Could not save config: {e}"
+            )));
+        }
     }
 
     fn draw(&mut self, guard: &mut TerminalGuard) -> Result<()> {

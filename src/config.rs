@@ -75,6 +75,17 @@ impl From<ProjectConfig> for Project {
     }
 }
 
+impl From<Project> for ProjectConfig {
+    fn from(p: Project) -> Self {
+        ProjectConfig {
+            owner: p.owner,
+            repo: p.repo,
+            branch: p.branch,
+            label: p.label,
+        }
+    }
+}
+
 /// Errors raised while resolving or parsing configuration.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -194,6 +205,20 @@ impl Config {
         self.projects
             .retain(|p| !eq_slug(&p.owner, &p.repo, owner, repo));
         self.projects.len() != before
+    }
+
+    /// Remove every project belonging to `owner` (case-insensitive) — i.e. drop
+    /// a whole company/org at once. Returns how many were removed.
+    pub fn remove_owner(&mut self, owner: &str) -> usize {
+        let before = self.projects.len();
+        self.projects
+            .retain(|p| !p.owner.eq_ignore_ascii_case(owner.trim()));
+        before - self.projects.len()
+    }
+
+    /// Replace the entire project list (used when the TUI persists an edit).
+    pub fn set_projects(&mut self, projects: impl IntoIterator<Item = Project>) {
+        self.projects = projects.into_iter().map(ProjectConfig::from).collect();
     }
 
     /// Write a starter config (used by `ghs init`). Creates parent dirs.

@@ -153,6 +153,25 @@ impl Theme {
         Style::default().fg(self.text).add_modifier(Modifier::BOLD)
     }
 
+    /// Title style for a destructive modal.
+    pub fn danger_title(&self) -> Style {
+        Style::default()
+            .fg(self.failure)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// Border style for a destructive modal.
+    pub fn danger_border(&self) -> Style {
+        Style::default().fg(self.failure)
+    }
+
+    /// Highlight style for the affirmative (destructive) confirm key.
+    pub fn confirm_yes(&self) -> Style {
+        Style::default()
+            .fg(self.failure)
+            .add_modifier(Modifier::BOLD)
+    }
+
     /// Frames for the activity spinner (braille animation).
     pub const SPINNER: [&'static str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 

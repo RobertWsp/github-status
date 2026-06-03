@@ -45,6 +45,11 @@ pub fn render(frame: &mut Frame, state: &AppState, theme: &Theme) {
     if state.show_help {
         widgets::help::render(frame, frame.area(), theme);
     }
+
+    // The confirm modal is the top-most overlay and captures focus.
+    if let Some(pending) = &state.pending_delete {
+        widgets::confirm::render(frame, frame.area(), pending, theme);
+    }
 }
 
 /// Add one column of left padding to a single-row bar.

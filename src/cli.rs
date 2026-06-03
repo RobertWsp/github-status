@@ -34,10 +34,13 @@ pub enum CommandKind {
         #[arg(value_name = "OWNER/REPO", required = true)]
         repos: Vec<String>,
     },
-    /// Remove one or more repositories (owner/repo).
+    /// Remove repositories, or a whole owner/company.
+    ///
+    /// Pass `owner/repo` to remove one repo, or just `owner` to remove every
+    /// repository of that owner.
     Remove {
-        /// Repos to remove.
-        #[arg(value_name = "OWNER/REPO", required = true)]
+        /// `owner/repo` (single) or `owner` (whole company).
+        #[arg(value_name = "OWNER[/REPO]", required = true)]
         repos: Vec<String>,
     },
     /// Bulk-import repositories from git clones or your GitHub account.

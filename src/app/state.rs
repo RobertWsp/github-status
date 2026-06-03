@@ -31,8 +31,31 @@ pub enum Command {
     RefreshAll,
     /// Open this URL in the system browser.
     OpenUrl(String),
+    /// Persist the current project list (after a delete) via the store.
+    PersistProjects,
     /// Tear down and exit.
     Quit,
+}
+
+/// A confirmation pending the user's yes/no — drives the delete modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingDelete {
+    /// Remove a single repository (`owner/repo`).
+    Repo { slug: String },
+    /// Remove every repository of an owner/company; `count` is how many.
+    Owner { owner: String, count: usize },
+}
+
+impl PendingDelete {
+    /// Human-readable prompt body.
+    pub fn prompt(&self) -> String {
+        match self {
+            Self::Repo { slug } => format!("Remove {slug} from your dashboard?"),
+            Self::Owner { owner, count } => {
+                format!("Remove ALL {count} repo(s) of \"{owner}\" from your dashboard?")
+            }
+        }
+    }
 }
 
 /// Keyboard input mode — determines how keys are interpreted.
@@ -67,6 +90,8 @@ pub struct AppState {
     pub spinner_frame: usize,
     /// Optional transient notification.
     pub toast: Option<Toast>,
+    /// A delete awaiting confirmation (modal). `None` means no prompt.
+    pub pending_delete: Option<PendingDelete>,
 }
 
 impl AppState {
@@ -83,6 +108,7 @@ impl AppState {
             inflight: 0,
             spinner_frame: 0,
             toast: None,
+            pending_delete: None,
         }
     }
 
@@ -207,6 +233,19 @@ impl AppState {
                 }
                 Command::None
             }
+            Action::RequestDeleteRepo => {
+                self.request_delete_repo();
+                Command::None
+            }
+            Action::RequestDeleteOwner => {
+                self.request_delete_owner();
+                Command::None
+            }
+            Action::ConfirmDelete => self.confirm_delete(),
+            Action::CancelDelete => {
+                self.pending_delete = None;
+                Command::None
+            }
             Action::Escape => self.handle_escape(),
             Action::Quit => {
                 self.running = false;
@@ -274,10 +313,78 @@ impl AppState {
         Command::None
     }
 
+    /// Stage a confirm prompt to remove the selected repository.
+    fn request_delete_repo(&mut self) {
+        if let Some(status) = self.selected_status() {
+            self.pending_delete = Some(PendingDelete::Repo {
+                slug: status.project.slug(),
+            });
+        }
+    }
+
+    /// Stage a confirm prompt to remove the selected owner's whole company.
+    fn request_delete_owner(&mut self) {
+        if let Some(status) = self.selected_status() {
+            let owner = status.project.owner.clone();
+            let count = self
+                .projects
+                .iter()
+                .filter(|s| s.project.belongs_to(&owner))
+                .count();
+            self.pending_delete = Some(PendingDelete::Owner { owner, count });
+        }
+    }
+
+    /// Apply the pending delete to the in-memory project list and request that
+    /// the runtime persist it. The reducer never writes to disk itself.
+    fn confirm_delete(&mut self) -> Command {
+        let Some(pending) = self.pending_delete.take() else {
+            return Command::None;
+        };
+        let (removed, summary): (usize, String) = match &pending {
+            PendingDelete::Repo { slug } => {
+                let before = self.projects.len();
+                self.projects.retain(|s| s.project.slug() != *slug);
+                (before - self.projects.len(), format!("Removed {slug}"))
+            }
+            PendingDelete::Owner { owner, .. } => {
+                let before = self.projects.len();
+                self.projects.retain(|s| !s.project.belongs_to(owner));
+                let n = before - self.projects.len();
+                (n, format!("Removed {n} repo(s) of \"{owner}\""))
+            }
+        };
+
+        if removed == 0 {
+            self.toast = Some(Toast::warning("Nothing was removed"));
+            return Command::None;
+        }
+
+        // Owner filter may now match nothing; drop it to avoid an empty list.
+        if let Some(owner) = &self.owner_filter {
+            if !self.projects.iter().any(|s| s.project.belongs_to(owner)) {
+                self.owner_filter = None;
+            }
+        }
+        self.clamp_selection();
+        self.toast = Some(Toast::success(summary));
+        Command::PersistProjects
+    }
+
+    /// Snapshot of the current projects as plain domain values — used by the
+    /// runtime to persist via the [`ProjectStore`](crate::ports::ProjectStore).
+    pub fn project_list(&self) -> Vec<Project> {
+        self.projects.iter().map(|s| s.project.clone()).collect()
+    }
+
     /// Context-sensitive escape, mirroring familiar TUI behavior:
-    /// search mode → leave search; else active filter → clear it; else quit.
+    /// pending delete → cancel; search mode → leave search; else active
+    /// filter → clear it; else quit.
     fn handle_escape(&mut self) -> Command {
-        if self.mode == InputMode::Search {
+        if self.pending_delete.is_some() {
+            self.pending_delete = None;
+            Command::None
+        } else if self.mode == InputMode::Search {
             self.mode = InputMode::Normal;
             self.clamp_selection();
             Command::None
@@ -407,6 +514,61 @@ mod tests {
         assert_eq!(cmd, Command::RefreshAll);
         assert_eq!(s.inflight, 2);
         assert!(s.is_loading());
+    }
+
+    #[test]
+    fn delete_repo_needs_confirmation_then_persists() {
+        let mut s = AppState::new(vec![project("acme", "api"), project("acme", "web")]);
+        // Request opens a prompt but changes nothing yet.
+        s.update(Action::RequestDeleteRepo);
+        assert!(s.pending_delete.is_some());
+        assert_eq!(s.projects.len(), 2);
+        // Confirm removes it and asks the runtime to persist.
+        let cmd = s.update(Action::ConfirmDelete);
+        assert_eq!(cmd, Command::PersistProjects);
+        assert_eq!(s.projects.len(), 1);
+        assert!(s.pending_delete.is_none());
+    }
+
+    #[test]
+    fn cancel_delete_keeps_everything() {
+        let mut s = AppState::new(vec![project("acme", "api")]);
+        s.update(Action::RequestDeleteRepo);
+        let cmd = s.update(Action::CancelDelete);
+        assert_eq!(cmd, Command::None);
+        assert_eq!(s.projects.len(), 1);
+        assert!(s.pending_delete.is_none());
+    }
+
+    #[test]
+    fn delete_owner_removes_whole_company() {
+        let mut s = AppState::new(vec![
+            project("acme", "api"),
+            project("acme", "web"),
+            project("other", "x"),
+        ]);
+        s.update(Action::RequestDeleteOwner);
+        match &s.pending_delete {
+            Some(PendingDelete::Owner { owner, count }) => {
+                assert_eq!(owner, "acme");
+                assert_eq!(*count, 2);
+            }
+            _ => panic!("expected owner delete"),
+        }
+        let cmd = s.update(Action::ConfirmDelete);
+        assert_eq!(cmd, Command::PersistProjects);
+        assert_eq!(s.projects.len(), 1);
+        assert_eq!(s.projects[0].project.owner, "other");
+    }
+
+    #[test]
+    fn escape_cancels_pending_delete_first() {
+        let mut s = AppState::new(vec![project("acme", "api")]);
+        s.update(Action::RequestDeleteRepo);
+        let cmd = s.update(Action::Escape);
+        assert_eq!(cmd, Command::None);
+        assert!(s.pending_delete.is_none());
+        assert!(s.running);
     }
 
     #[test]

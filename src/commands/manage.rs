@@ -56,25 +56,41 @@ pub fn add(path: &Path, specs: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `ghs remove owner/repo …` — drop repos from the config.
+/// `ghs remove <spec> …` — drop repos from the config.
+///
+/// Each `spec` is either:
+///   * `owner/repo` — removes that single repository, or
+///   * `owner`      — removes **every** repository of that owner/company.
 pub fn remove(path: &Path, specs: &[String]) -> Result<()> {
     let (mut config, path) = Config::load_or_default(Some(path))?;
 
     let mut removed = 0;
     for spec in specs {
-        // Accept full specs but only owner/repo matters for removal.
-        let project = match Project::parse(spec) {
-            Ok(p) => p,
-            Err(e) => {
-                println!("✗ skipped '{spec}': {e}");
-                continue;
+        let spec = spec.trim();
+        if spec.contains('/') {
+            // Single repo.
+            match Project::parse(spec) {
+                Ok(project) => {
+                    if config.remove_project(&project.owner, &project.repo) {
+                        println!("✓ removed {}", project.slug());
+                        removed += 1;
+                    } else {
+                        println!("· {} was not tracked", project.slug());
+                    }
+                }
+                Err(e) => println!("✗ skipped '{spec}': {e}"),
             }
-        };
-        if config.remove_project(&project.owner, &project.repo) {
-            println!("✓ removed {}", project.slug());
-            removed += 1;
+        } else if spec.is_empty() {
+            continue;
         } else {
-            println!("· {} was not tracked", project.slug());
+            // Owner-only: remove the whole company.
+            let n = config.remove_owner(spec);
+            if n > 0 {
+                println!("✓ removed {n} repo(s) of \"{spec}\"");
+                removed += n;
+            } else {
+                println!("· no repos of \"{spec}\" were tracked");
+            }
         }
     }
 

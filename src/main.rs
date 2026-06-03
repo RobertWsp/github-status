@@ -11,11 +11,11 @@ use std::sync::Arc;
 use clap::Parser;
 use color_eyre::eyre::{Result, WrapErr};
 
-use github_status::adapters::GithubProvider;
+use github_status::adapters::{FileProjectStore, GithubProvider};
 use github_status::cli::{Cli, CommandKind};
 use github_status::commands;
 use github_status::config::Config;
-use github_status::ports::StatusProvider;
+use github_status::ports::{ProjectStore, StatusProvider};
 use github_status::tui::{Runtime, TerminalGuard};
 use github_status::{app::AppState, app::StatusService};
 
@@ -61,11 +61,15 @@ async fn main() -> Result<()> {
         | CommandKind::Init { .. }
         | CommandKind::Where
         | CommandKind::Add { .. }
-        | CommandKind::Remove { .. } => run_tui(provider, config).await,
+        | CommandKind::Remove { .. } => run_tui(provider, config, config_path).await,
     }
 }
 
-async fn run_tui(provider: Arc<dyn StatusProvider>, config: Config) -> Result<()> {
+async fn run_tui(
+    provider: Arc<dyn StatusProvider>,
+    config: Config,
+    config_path: PathBuf,
+) -> Result<()> {
     let projects = config.projects();
     let state = AppState::new(projects);
     let service = StatusService::with_concurrency(
@@ -73,7 +77,9 @@ async fn run_tui(provider: Arc<dyn StatusProvider>, config: Config) -> Result<()
         config.settings.runs_per_project,
         config.settings.max_concurrency,
     );
-    let runtime = Runtime::new(state, service, config.settings.refresh_interval_secs);
+    // Inject the file-backed store so in-TUI deletes persist to the config.
+    let store: Arc<dyn ProjectStore> = Arc::new(FileProjectStore::new(config_path));
+    let runtime = Runtime::new(state, service, store, config.settings.refresh_interval_secs);
     runtime.run().await
 }
 

@@ -59,3 +59,20 @@ pub trait RepoDiscovery: Send + Sync {
     /// List repositories from `source`. Returns bare [`Project`]s (no branch).
     async fn discover(&self, source: DiscoverySource) -> Result<Vec<Project>, ProviderError>;
 }
+
+/// Error persisting the tracked-project list.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to persist projects: {0}")]
+pub struct StoreError(pub String);
+
+/// Persists the set of tracked projects (the config file's project list).
+///
+/// This port lets the interactive TUI mutate which repositories are tracked
+/// (e.g. remove one repo, or a whole company) and have the change written to
+/// disk, **without** the pure [`AppState`](crate::app::AppState) ever touching
+/// the filesystem. The runtime shell calls this; the reducer only signals
+/// intent via a `Command`.
+pub trait ProjectStore: Send + Sync {
+    /// Replace the persisted project list with `projects` (the new full set).
+    fn save(&self, projects: &[Project]) -> Result<(), StoreError>;
+}

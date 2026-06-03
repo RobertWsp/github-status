@@ -34,7 +34,16 @@ pub enum Action {
     FilterSelectedOwner,
     /// Clear all active filters (search query + owner).
     ClearFilters,
-    /// Context-sensitive escape: exit search, else clear filters, else quit.
+    /// Ask to remove the selected repository (opens a confirm prompt).
+    RequestDeleteRepo,
+    /// Ask to remove every repo of the selected owner (company).
+    RequestDeleteOwner,
+    /// Confirm the pending delete.
+    ConfirmDelete,
+    /// Dismiss the pending delete without acting.
+    CancelDelete,
+    /// Context-sensitive escape: confirm prompt → cancel, search → exit,
+    /// filters → clear, else quit.
     Escape,
     /// Request to quit.
     Quit,

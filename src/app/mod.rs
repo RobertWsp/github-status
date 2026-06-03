@@ -11,5 +11,5 @@ pub mod toast;
 
 pub use action::Action;
 pub use service::StatusService;
-pub use state::{AppState, Command, InputMode};
+pub use state::{AppState, Command, InputMode, PendingDelete};
 pub use toast::{Toast, ToastKind};

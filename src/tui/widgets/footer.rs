@@ -44,6 +44,7 @@ fn normal_hints<'a>(state: &AppState, theme: &Theme) -> Line<'a> {
         ("↑↓", "navigate"),
         ("/", "search"),
         ("f", "owner"),
+        ("d", "remove"),
         ("r", "refresh"),
         ("o", "open"),
     ];
