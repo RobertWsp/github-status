@@ -25,17 +25,20 @@ pub async fn import(
         return Ok(());
     }
 
-    println!(
-        "Found {} repositor{}:",
-        discovered.len(),
-        plural(discovered.len())
-    );
-    for p in &discovered {
+    let total = discovered.len();
+    println!("Found {total} repositor{}:", plural(total));
+    // Print the full list when small; otherwise summarize to avoid flooding the
+    // terminal for accounts with hundreds of repos.
+    const PREVIEW: usize = 30;
+    for p in discovered.iter().take(PREVIEW) {
         println!("  • {}", p.slug());
+    }
+    if total > PREVIEW {
+        println!("  … and {} more", total - PREVIEW);
     }
 
     if args.dry_run {
-        println!("\n(dry run — nothing written)");
+        println!("\n(dry run — nothing written; archived repos are excluded)");
         return Ok(());
     }
 

@@ -61,40 +61,54 @@ impl StatusProvider for GithubProvider {
 #[async_trait]
 impl RepoDiscovery for GithubProvider {
     async fn discover(&self, source: DiscoverySource) -> Result<Vec<Project>, ProviderError> {
-        let page = match source {
-            DiscoverySource::AuthenticatedUser => self
-                .client
-                .current()
-                .list_repos_for_authenticated_user()
-                .per_page(100)
-                .send()
-                .await
-                .map_err(map_error)?,
-            DiscoverySource::Org(org) => self
-                .client
-                .orgs(&org)
-                .list_repos()
-                .per_page(100)
-                .send()
-                .await
-                .map_err(map_error)?,
-            DiscoverySource::User(user) => {
-                // No typed handler for another user's repos; use the REST route.
-                let route = format!("/users/{user}/repos?per_page=100&sort=pushed");
-                self.client
-                    .get(route, None::<&()>)
-                    .await
-                    .map_err(map_error)?
-            }
-        };
+        // Fetch the *first* page, then follow `Link: rel="next"` to the end via
+        // `all_pages`. GitHub caps `per_page` at 100, so a single request only
+        // ever returns the first 100 repos — accounts with more would silently
+        // lose the rest without this pagination. (Previously a real bug: 194
+        // repos truncated to 100.)
+        let first = self.first_page(&source).await?;
+        let all = self.client.all_pages(first).await.map_err(map_error)?;
 
-        let projects = page
-            .items
+        let projects = all
             .into_iter()
             .filter(|r| !r.archived.unwrap_or(false))
             .filter_map(map_repo)
             .collect();
         Ok(projects)
+    }
+}
+
+impl GithubProvider {
+    /// Request the first page (100 items) for a discovery source. The returned
+    /// [`Page`] carries the `next` link used by [`Octocrab::all_pages`].
+    async fn first_page(
+        &self,
+        source: &DiscoverySource,
+    ) -> Result<octocrab::Page<Repository>, ProviderError> {
+        match source {
+            DiscoverySource::AuthenticatedUser => self
+                .client
+                .current()
+                .list_repos_for_authenticated_user()
+                .sort("pushed")
+                .per_page(100)
+                .send()
+                .await
+                .map_err(map_error),
+            DiscoverySource::Org(org) => self
+                .client
+                .orgs(org)
+                .list_repos()
+                .per_page(100)
+                .send()
+                .await
+                .map_err(map_error),
+            DiscoverySource::User(user) => {
+                // No typed handler for another user's repos; use the REST route.
+                let route = format!("/users/{user}/repos?per_page=100&sort=pushed");
+                self.client.get(route, None::<&()>).await.map_err(map_error)
+            }
+        }
     }
 }
 
