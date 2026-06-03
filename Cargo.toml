@@ -1,0 +1,50 @@
+[package]
+name = "github-status"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Interactive TUI to monitor GitHub Actions status across your configured projects"
+license = "MIT"
+authors = ["Robert"]
+
+[[bin]]
+name = "ghs"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# GitHub API client (anti-corruption boundary lives in adapters/github)
+octocrab = "0.53"
+
+# TUI stack
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# CLI args
+clap = { version = "4", features = ["derive"] }
+
+# Config & serialization
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+directories = "6"
+
+# Error handling
+color-eyre = "0.6"
+thiserror = "2"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Tracing (file logs so they don't corrupt the TUI)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

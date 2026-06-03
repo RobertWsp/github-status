@@ -1,0 +1,15 @@
+//! Application layer — UI-agnostic orchestration and state.
+//!
+//! Depends on `domain` and `ports`; knows nothing about ratatui or octocrab.
+//! The `tui` layer drives this state; a future `web` or `json` frontend could
+//! reuse it unchanged.
+
+pub mod action;
+pub mod service;
+pub mod state;
+pub mod toast;
+
+pub use action::Action;
+pub use service::StatusService;
+pub use state::{AppState, Command, InputMode};
+pub use toast::{Toast, ToastKind};

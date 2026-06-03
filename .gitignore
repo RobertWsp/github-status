@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Tooling / editor metadata
+.obsidian-memory-scope.json
