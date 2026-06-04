@@ -4,11 +4,13 @@
 //! the stable core that every outer layer (adapters, app, tui) depends on,
 //! never the reverse (dependency-inversion / hexagonal architecture).
 
+pub mod poll;
 pub mod project;
 pub mod project_status;
 pub mod run;
 pub mod status;
 
+pub use poll::{PollIntervals, PollTier};
 pub use project::{ParseProjectError, Project};
 pub use project_status::{LoadState, ProjectStatus};
 pub use run::WorkflowRun;

@@ -48,12 +48,20 @@ impl StatusService {
         }
     }
 
-    /// Fetch every project concurrently (bounded by the semaphore). Each
-    /// completion is sent as an [`Action`] over `tx`; `index` ties the result
-    /// back to its slot in [`AppState`]. Returns immediately — work happens on
-    /// spawned tasks.
+    /// Fetch every project concurrently, tying results back to their physical
+    /// index in [`AppState`]. Convenience over [`Self::refresh`].
     pub fn refresh_all(&self, projects: &[Project], tx: UnboundedSender<Action>) {
-        for (index, project) in projects.iter().cloned().enumerate() {
+        let targets: Vec<(usize, Project)> = projects.iter().cloned().enumerate().collect();
+        self.refresh(targets, tx);
+    }
+
+    /// Fetch a specific subset of projects concurrently (bounded by the
+    /// semaphore). `targets` pairs each project with its physical index in
+    /// [`AppState`] so the completion can be applied to the right slot. This is
+    /// what the adaptive scheduler uses to poll only what's due & visible.
+    /// Returns immediately — work happens on spawned tasks.
+    pub fn refresh(&self, targets: Vec<(usize, Project)>, tx: UnboundedSender<Action>) {
+        for (index, project) in targets {
             let provider = Arc::clone(&self.provider);
             let permits = Arc::clone(&self.permits);
             let limit = self.runs_per_project;

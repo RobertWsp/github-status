@@ -18,21 +18,27 @@
 //! (failures floating up), the cursor stays put at its position instead of
 //! being dragged down with whatever row it started on.
 
+use chrono::{DateTime, Utc};
+
 use super::action::Action;
 use super::toast::{Toast, ToastKind};
-use crate::domain::{LoadState, Project, ProjectStatus};
+use crate::domain::{LoadState, PollIntervals, Project, ProjectStatus};
 
 /// Side effects the runtime should perform after an update.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     /// Nothing to do.
     None,
-    /// Begin fetching all projects.
-    RefreshAll,
+    /// Fetch this specific set of `(physical index, project)` pairs. The
+    /// reducer has already marked them `Loading` and recorded the attempt time;
+    /// the runtime just hands them to the [`StatusService`](super::StatusService).
+    Fetch(Vec<(usize, Project)>),
     /// Open this URL in the system browser.
     OpenUrl(String),
     /// Persist the current project list (after a delete) via the store.
     PersistProjects,
+    /// Persist the current run data to the cache (after a poll batch settles).
+    PersistCache,
     /// Tear down and exit.
     Quit,
 }
@@ -92,11 +98,22 @@ pub struct AppState {
     pub toast: Option<Toast>,
     /// A delete awaiting confirmation (modal). `None` means no prompt.
     pub pending_delete: Option<PendingDelete>,
+    /// Adaptive polling intervals (from config).
+    pub intervals: PollIntervals,
+    /// While `Some(until)`, polling is paused due to a rate-limit response.
+    pub rate_limited_until: Option<DateTime<Utc>>,
+    /// Set when run data changed and the cache should be re-persisted.
+    pub cache_dirty: bool,
 }
 
 impl AppState {
     /// Build initial state from the configured projects.
     pub fn new(projects: Vec<Project>) -> Self {
+        Self::with_intervals(projects, PollIntervals::default())
+    }
+
+    /// Build with explicit polling intervals (from config).
+    pub fn with_intervals(projects: Vec<Project>, intervals: PollIntervals) -> Self {
         Self {
             projects: projects.into_iter().map(ProjectStatus::new).collect(),
             selected: 0,
@@ -109,7 +126,41 @@ impl AppState {
             spinner_frame: 0,
             toast: None,
             pending_delete: None,
+            intervals,
+            rate_limited_until: None,
+            cache_dirty: false,
         }
+    }
+
+    /// Hydrate already-loaded projects from cached snapshots (matched by slug).
+    /// Unmatched projects stay `Idle`. Called once at startup.
+    pub fn hydrate_from_cache(&mut self, cached: &[crate::ports::CachedProject]) {
+        use std::collections::HashMap;
+        let by_slug: HashMap<&str, &crate::ports::CachedProject> =
+            cached.iter().map(|c| (c.slug.as_str(), c)).collect();
+        for status in &mut self.projects {
+            if let Some(c) = by_slug.get(status.project.slug().as_str()) {
+                *status =
+                    ProjectStatus::from_cache(status.project.clone(), c.runs.clone(), c.fetched_at);
+            }
+        }
+        self.projects.sort_by(ProjectStatus::cmp_display);
+        self.clamp_selection();
+    }
+
+    /// Snapshot the loaded projects as cache entries to persist.
+    pub fn cache_entries(&self) -> Vec<crate::ports::CachedProject> {
+        self.projects
+            .iter()
+            .filter_map(|s| match &s.load {
+                LoadState::Loaded { runs, fetched_at } => Some(crate::ports::CachedProject {
+                    slug: s.project.slug(),
+                    runs: runs.clone(),
+                    fetched_at: *fetched_at,
+                }),
+                _ => None,
+            })
+            .collect()
     }
 
     // --- Derived views (computed, never stored) ------------------------------
@@ -187,7 +238,8 @@ impl AppState {
                 self.show_help = !self.show_help;
                 Command::None
             }
-            Action::Refresh => self.begin_refresh(),
+            Action::Refresh => self.force_refresh_visible(),
+            Action::PollDue => self.poll_due(),
             Action::OpenInBrowser => self.open_selected(),
             Action::EnterSearch => {
                 self.mode = InputMode::Search;
@@ -260,29 +312,68 @@ impl AppState {
                 }
                 Command::None
             }
-            Action::FetchCompleted { index, result } => {
-                self.apply_fetch_result(index, result);
-                Command::None
-            }
+            Action::FetchCompleted { index, result } => self.apply_fetch_result(index, result),
             Action::Noop => Command::None,
         }
     }
 
-    /// Mark every project as loading and request a full refresh.
-    pub fn begin_refresh(&mut self) -> Command {
-        if self.projects.is_empty() {
-            self.toast = Some(Toast::warning("No projects to refresh"));
+    /// Whether polling is currently paused due to a rate-limit cooldown.
+    pub fn is_rate_limited(&self, now: DateTime<Utc>) -> bool {
+        self.rate_limited_until.is_some_and(|until| now < until)
+    }
+
+    /// Manual full refresh of every **visible** project (the `r` key). Ignores
+    /// due-times so the user always gets fresh data on demand, but still
+    /// respects an active rate-limit cooldown.
+    pub fn force_refresh_visible(&mut self) -> Command {
+        let now = Utc::now();
+        if self.is_rate_limited(now) {
+            self.toast = Some(Toast::warning("Rate limited — refresh paused briefly"));
             return Command::None;
         }
-        for p in &mut self.projects {
-            p.load = LoadState::Loading;
+        let targets: Vec<usize> = self.visible_indices();
+        if targets.is_empty() {
+            self.toast = Some(Toast::warning("Nothing visible to refresh"));
+            return Command::None;
         }
-        self.inflight = self.projects.len();
         self.toast = Some(Toast::info(format!(
             "Refreshing {} project(s)…",
-            self.inflight
+            targets.len()
         )));
-        Command::RefreshAll
+        self.start_fetch(targets, now)
+    }
+
+    /// Scheduler-driven poll: fetch only visible projects that are *due* by
+    /// their adaptive tier. Silent (no toast) since it runs on a timer.
+    pub fn poll_due(&mut self) -> Command {
+        let now = Utc::now();
+        if self.is_rate_limited(now) {
+            return Command::None;
+        }
+        let targets: Vec<usize> = self
+            .visible_indices()
+            .into_iter()
+            .filter(|&i| self.projects[i].is_due(&self.intervals, now))
+            .collect();
+        if targets.is_empty() {
+            return Command::None;
+        }
+        self.start_fetch(targets, now)
+    }
+
+    /// Mark the given physical indices as loading, stamp the attempt time, and
+    /// emit a [`Command::Fetch`] carrying the `(index, project)` pairs.
+    fn start_fetch(&mut self, indices: Vec<usize>, now: DateTime<Utc>) -> Command {
+        let mut targets = Vec::with_capacity(indices.len());
+        for i in indices {
+            if let Some(s) = self.projects.get_mut(i) {
+                s.load = LoadState::Loading;
+                s.last_attempt_at = Some(now);
+                targets.push((i, s.project.clone()));
+            }
+        }
+        self.inflight += targets.len();
+        Command::Fetch(targets)
     }
 
     fn open_selected(&mut self) -> Command {
@@ -400,35 +491,63 @@ impl AppState {
         &mut self,
         index: usize,
         result: Result<Vec<crate::domain::WorkflowRun>, crate::ports::ProviderError>,
-    ) {
+    ) -> Command {
+        let now = Utc::now();
+        let mut rate_limited = false;
         if let Some(status) = self.projects.get_mut(index) {
-            status.load = match result {
-                Ok(runs) => LoadState::Loaded {
-                    runs,
-                    fetched_at: chrono::Utc::now(),
-                },
-                Err(e) => LoadState::Failed {
-                    message: e.to_string(),
-                },
-            };
+            match result {
+                Ok(runs) => {
+                    status.consecutive_errors = 0;
+                    status.load = LoadState::Loaded {
+                        runs,
+                        fetched_at: now,
+                    };
+                    self.cache_dirty = true;
+                }
+                Err(e) => {
+                    status.consecutive_errors = status.consecutive_errors.saturating_add(1);
+                    rate_limited = matches!(e, crate::ports::ProviderError::RateLimited(_));
+                    status.load = LoadState::Failed {
+                        message: e.to_string(),
+                    };
+                }
+            }
         }
         self.inflight = self.inflight.saturating_sub(1);
+
+        // A rate-limit response pauses *all* polling for a cooldown window so we
+        // back off globally instead of hammering the API.
+        if rate_limited {
+            self.rate_limited_until = Some(now + chrono::Duration::seconds(60));
+            self.toast = Some(Toast::warning(
+                "GitHub rate limit hit — pausing polling 60s",
+            ));
+        }
+
         // Re-sort once the whole batch settles so indices stay stable during
         // the batch (FetchCompleted carries physical indices).
         if self.inflight == 0 {
             self.projects.sort_by(ProjectStatus::cmp_display);
             self.clamp_selection();
-            let failures = self
-                .projects
-                .iter()
-                .filter(|s| s.headline_state().is_some_and(|st| st.is_failure()))
-                .count();
-            self.toast = Some(if failures > 0 {
-                Toast::error(format!("{failures} project(s) failing"))
-            } else {
-                Toast::success("All projects healthy")
-            });
+            if !rate_limited {
+                let failures = self
+                    .projects
+                    .iter()
+                    .filter(|s| s.headline_state().is_some_and(|st| st.is_failure()))
+                    .count();
+                self.toast = Some(if failures > 0 {
+                    Toast::error(format!("{failures} project(s) failing"))
+                } else {
+                    Toast::success("All projects healthy")
+                });
+            }
+            // Persist the freshly-updated runs to the cache, if anything changed.
+            if self.cache_dirty {
+                self.cache_dirty = false;
+                return Command::PersistCache;
+            }
         }
+        Command::None
     }
 
     /// Move selection within the visible list, wrapping around.
@@ -511,9 +630,60 @@ mod tests {
     fn refresh_marks_all_loading_and_counts_inflight() {
         let mut s = AppState::new(vec![project("a", "a"), project("b", "b")]);
         let cmd = s.update(Action::Refresh);
-        assert_eq!(cmd, Command::RefreshAll);
+        match cmd {
+            Command::Fetch(targets) => assert_eq!(targets.len(), 2),
+            other => panic!("expected Fetch, got {other:?}"),
+        }
         assert_eq!(s.inflight, 2);
         assert!(s.is_loading());
+    }
+
+    #[test]
+    fn poll_due_only_fetches_due_projects() {
+        let mut s = AppState::new(vec![project("a", "a"), project("b", "b")]);
+        // Both idle → both due immediately.
+        match s.poll_due() {
+            Command::Fetch(t) => assert_eq!(t.len(), 2),
+            other => panic!("expected Fetch, got {other:?}"),
+        }
+        // Now both are Loading → nothing due.
+        assert_eq!(s.poll_due(), Command::None);
+    }
+
+    #[test]
+    fn rate_limit_pauses_polling() {
+        let mut s = AppState::new(vec![project("a", "a")]);
+        s.update(Action::Refresh);
+        s.update(Action::FetchCompleted {
+            index: 0,
+            result: Err(crate::ports::ProviderError::RateLimited("slow down".into())),
+        });
+        assert!(s.is_rate_limited(Utc::now()));
+        // While rate limited, polling yields nothing.
+        assert_eq!(s.poll_due(), Command::None);
+    }
+
+    #[test]
+    fn failed_fetch_increments_backoff_counter() {
+        let mut s = AppState::new(vec![project("a", "a")]);
+        s.update(Action::Refresh);
+        s.update(Action::FetchCompleted {
+            index: 0,
+            result: Err(crate::ports::ProviderError::Other("boom".into())),
+        });
+        assert_eq!(s.projects[0].consecutive_errors, 1);
+    }
+
+    #[test]
+    fn successful_fetch_marks_cache_dirty_and_persists() {
+        let mut s = AppState::new(vec![project("a", "a")]);
+        s.update(Action::Refresh);
+        let cmd = s.update(Action::FetchCompleted {
+            index: 0,
+            result: Ok(vec![run(RunState::Success)]),
+        });
+        // Batch settled with new data → ask runtime to persist the cache.
+        assert_eq!(cmd, Command::PersistCache);
     }
 
     #[test]

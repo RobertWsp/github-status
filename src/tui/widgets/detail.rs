@@ -52,6 +52,9 @@ fn detail_lines<'a>(status: &'a ProjectStatus, theme: &Theme) -> Vec<Line<'a>> {
             if runs.is_empty() {
                 return vec![hint(theme, "No workflow runs found for this project.")];
             }
+            // Show how this project is being polled (adaptive tier) so the
+            // cadence is transparent to the user.
+            let tier = status.poll_tier(chrono::Utc::now());
             let mut lines = vec![
                 Line::from(vec![
                     Span::styled("Recent runs", theme.title()),
@@ -59,6 +62,10 @@ fn detail_lines<'a>(status: &'a ProjectStatus, theme: &Theme) -> Vec<Line<'a>> {
                         format!("   fetched {}", format::relative_time(*fetched_at)),
                         theme.muted(),
                     ),
+                ]),
+                Line::from(vec![
+                    Span::styled("polling: ", theme.muted()),
+                    Span::styled(tier.label(), theme.dim()),
                 ]),
                 Line::from(""),
             ];

@@ -92,6 +92,40 @@ impl RunState {
         }
     }
 
+    /// A stable machine key for persistence (cache round-trips). Distinct from
+    /// [`label`](Self::label) (which is for humans and may change wording).
+    pub fn persist_key(self) -> &'static str {
+        match self {
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::ActionRequired => "action_required",
+            Self::InProgress => "in_progress",
+            Self::Queued => "queued",
+            Self::Success => "success",
+            Self::Skipped => "skipped",
+            Self::Neutral => "neutral",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Parse a [`persist_key`](Self::persist_key) back into a [`RunState`].
+    pub fn from_persist_key(key: &str) -> Option<Self> {
+        Some(match key {
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            "timed_out" => Self::TimedOut,
+            "action_required" => Self::ActionRequired,
+            "in_progress" => Self::InProgress,
+            "queued" => Self::Queued,
+            "success" => Self::Success,
+            "skipped" => Self::Skipped,
+            "neutral" => Self::Neutral,
+            "unknown" => Self::Unknown,
+            _ => return None,
+        })
+    }
+
     /// Short human label.
     pub fn label(self) -> &'static str {
         match self {

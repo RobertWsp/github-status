@@ -22,7 +22,13 @@ status** of all your configured repositories at a glance — built in Rust with
 - **Bounded-concurrent fetching** — projects load in parallel (capped by a
   semaphore so hundreds of repos won't trip rate limits); the list updates
   incrementally as results arrive.
-- **Auto-refresh** on a configurable timer, plus manual `r` refresh.
+- **Adaptive polling** — each repo is re-checked on a cadence matching its
+  state: running builds every few seconds, long-green or CI-less repos rarely.
+  Only **visible** (filtered) repos are polled, with exponential backoff on
+  errors and a global cooldown if GitHub rate-limits you.
+- **Persistent cache** — fetched runs are saved to disk, so the dashboard
+  hydrates instantly on startup instead of re-querying every repo.
+- **Manual `r` refresh** forces a refresh of everything visible on demand.
 - **Open in browser** (`o` / Enter) jumps to the latest run on github.com.
 - **Headless modes** for scripting: `ghs list` and `ghs check` (CI-friendly,
   non-zero exit on failures).
@@ -93,9 +99,17 @@ Config lives at the platform config dir (`ghs where` prints the path), e.g.
 
 ```toml
 [settings]
-refresh_interval_secs = 60   # 0 disables auto-refresh
+refresh_interval_secs = 60   # legacy fallback (adaptive polling is automatic)
 runs_per_project = 5
 max_concurrency = 8          # cap on simultaneous API requests per refresh
+cache_enabled = true         # persist runs to disk for instant startup
+# Adaptive polling intervals (seconds) per tier:
+poll_active_secs = 10        # a run is in progress / queued
+poll_recent_secs = 45        # recently active, or last run failed
+poll_stable_secs = 300       # healthy & quiet
+poll_dormant_secs = 1800     # repo has no CI/CD at all
+poll_backoff_base_secs = 30  # error backoff base (doubles each failure)
+poll_backoff_cap_secs = 900  # error backoff ceiling
 # token = "ghp_..."          # prefer the GITHUB_TOKEN env var instead
 
 [[project]]
@@ -161,8 +175,8 @@ Hexagonal (Ports & Adapters). Dependencies point **inward**; the pure
 | Module       | Responsibility                                                      |
 |--------------|---------------------------------------------------------------------|
 | `domain`     | Pure types & rules. SSoT for status semantics (`RunState`); `Project::parse`. |
-| `ports`      | The `StatusProvider`, `RepoDiscovery` and `ProjectStore` traits the app depends on. |
-| `adapters`   | octocrab provider (status + discovery), a `LocalGitScanner` reading `.git/config`, and a `FileProjectStore` persisting the project list. |
+| `ports`      | The `StatusProvider`, `RepoDiscovery`, `ProjectStore` and `CacheStore` traits the app depends on. |
+| `adapters`   | octocrab provider (status + discovery), a `LocalGitScanner` reading `.git/config`, a `FileProjectStore` (config), and a `FileCacheStore` (run cache). |
 | `app`        | UI-agnostic state machine (`AppState`), actions, orchestration.     |
 | `tui`        | ratatui widgets + async runtime. `theme` is the SSoT for the palette. |
 | `cli`/`commands` | clap args + headless entry points (status / manage / import / doctor). |
@@ -197,6 +211,18 @@ writing one new adapter; nothing else changes.
   recent CI activity, then owner/repo. Cheap enough to run on every refresh.
 - **Bounded concurrency:** `StatusService` gates fetches behind a `Semaphore`
   so tracking hundreds of repos can't spawn hundreds of simultaneous requests.
+- **Adaptive cadence as a domain rule:** `domain::poll` is the SSoT for *how
+  often* to poll. `ProjectStatus::poll_tier` classifies each repo (Active /
+  Recent / Stable / Dormant / Backoff) from its run history; the reducer only
+  fetches projects whose tier interval has elapsed **and** that are visible.
+  This slashes API volume — a filtered view of one company polls only that
+  company, and CI-less repos are nearly silent.
+- **Cache via a port:** `CacheStore` persists runs between sessions so startup
+  hydrates instantly (no 200-request burst). The reducer signals
+  `Command::PersistCache`; the runtime writes it. Losing the cache only costs
+  one refresh — never correctness.
+- **Rate-limit safety:** a `RateLimited` response sets a global cooldown that
+  pauses all polling, and per-project errors trigger exponential backoff.
 
 ## Development
 

@@ -76,3 +76,22 @@ pub trait ProjectStore: Send + Sync {
     /// Replace the persisted project list with `projects` (the new full set).
     fn save(&self, projects: &[Project]) -> Result<(), StoreError>;
 }
+
+/// A cached snapshot of one project's last successful fetch.
+#[derive(Debug, Clone)]
+pub struct CachedProject {
+    pub slug: String,
+    pub runs: Vec<WorkflowRun>,
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Persists fetched run data between sessions so the dashboard hydrates
+/// instantly on startup instead of re-querying every repo (which would be a
+/// rate-limit-spiking burst). This is a *cache* — losing it only costs a
+/// refresh, never correctness.
+pub trait CacheStore: Send + Sync {
+    /// Load all cached project snapshots (empty if none / unreadable).
+    fn load(&self) -> Vec<CachedProject>;
+    /// Persist the given snapshots, replacing any previous cache.
+    fn save(&self, entries: &[CachedProject]) -> Result<(), StoreError>;
+}

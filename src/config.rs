@@ -5,11 +5,12 @@
 //! app receives domain types, never the raw config structs.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::Project;
+use crate::domain::{PollIntervals, Project};
 
 /// Top-level config file (`config.toml`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -37,6 +38,16 @@ pub struct Settings {
     /// Max number of concurrent API requests during a refresh. Bounds load on
     /// the GitHub API when tracking many repositories.
     pub max_concurrency: usize,
+    /// Persist fetched runs to disk so the dashboard hydrates instantly on
+    /// startup without re-hitting the API for everything.
+    pub cache_enabled: bool,
+    /// Adaptive polling intervals (seconds) per tier. See [`crate::domain::poll`].
+    pub poll_active_secs: u64,
+    pub poll_recent_secs: u64,
+    pub poll_stable_secs: u64,
+    pub poll_dormant_secs: u64,
+    pub poll_backoff_base_secs: u64,
+    pub poll_backoff_cap_secs: u64,
     /// Personal access token. Prefer the `GITHUB_TOKEN` env var; this is a
     /// fallback for users who insist on storing it in the config file.
     pub token: Option<String>,
@@ -44,11 +55,33 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
+        let p = PollIntervals::default();
         Self {
             refresh_interval_secs: 60,
             runs_per_project: 5,
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
+            cache_enabled: true,
+            poll_active_secs: p.active.as_secs(),
+            poll_recent_secs: p.recent.as_secs(),
+            poll_stable_secs: p.stable.as_secs(),
+            poll_dormant_secs: p.dormant.as_secs(),
+            poll_backoff_base_secs: p.backoff_base.as_secs(),
+            poll_backoff_cap_secs: p.backoff_cap.as_secs(),
             token: None,
+        }
+    }
+}
+
+impl Settings {
+    /// Build the domain [`PollIntervals`] from the configured seconds.
+    pub fn poll_intervals(&self) -> PollIntervals {
+        PollIntervals {
+            active: Duration::from_secs(self.poll_active_secs.max(1)),
+            recent: Duration::from_secs(self.poll_recent_secs.max(1)),
+            stable: Duration::from_secs(self.poll_stable_secs.max(1)),
+            dormant: Duration::from_secs(self.poll_dormant_secs.max(1)),
+            backoff_base: Duration::from_secs(self.poll_backoff_base_secs.max(1)),
+            backoff_cap: Duration::from_secs(self.poll_backoff_cap_secs.max(1)),
         }
     }
 }

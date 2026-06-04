@@ -16,8 +16,11 @@ pub enum Action {
     /// Jump to the first/last project.
     Top,
     Bottom,
-    /// Trigger a refresh of all projects.
+    /// Force-refresh all currently visible projects now (manual `r`).
     Refresh,
+    /// Scheduler tick: poll only the visible projects that are *due* per their
+    /// adaptive tier. Emitted by the runtime on its timer.
+    PollDue,
     /// Open the selected project's latest run in a browser.
     OpenInBrowser,
     /// Toggle the help overlay.

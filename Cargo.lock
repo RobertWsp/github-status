@@ -827,6 +827,7 @@ dependencies = [
  "octocrab",
  "ratatui",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "toml",

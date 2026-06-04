@@ -11,11 +11,11 @@ use std::sync::Arc;
 use clap::Parser;
 use color_eyre::eyre::{Result, WrapErr};
 
-use github_status::adapters::{FileProjectStore, GithubProvider};
+use github_status::adapters::{FileCacheStore, FileProjectStore, GithubProvider};
 use github_status::cli::{Cli, CommandKind};
 use github_status::commands;
 use github_status::config::Config;
-use github_status::ports::{ProjectStore, StatusProvider};
+use github_status::ports::{CacheStore, ProjectStore, StatusProvider};
 use github_status::tui::{Runtime, TerminalGuard};
 use github_status::{app::AppState, app::StatusService};
 
@@ -71,7 +71,8 @@ async fn run_tui(
     config_path: PathBuf,
 ) -> Result<()> {
     let projects = config.projects();
-    let state = AppState::new(projects);
+    // Seed the state with the configured adaptive polling intervals.
+    let state = AppState::with_intervals(projects, config.settings.poll_intervals());
     let service = StatusService::with_concurrency(
         provider,
         config.settings.runs_per_project,
@@ -79,8 +80,33 @@ async fn run_tui(
     );
     // Inject the file-backed store so in-TUI deletes persist to the config.
     let store: Arc<dyn ProjectStore> = Arc::new(FileProjectStore::new(config_path));
-    let runtime = Runtime::new(state, service, store, config.settings.refresh_interval_secs);
+    // Cache adapter (no-op cache if the data dir can't be determined or it's
+    // disabled in settings) hydrates the dashboard instantly on startup.
+    let cache: Arc<dyn CacheStore> = build_cache(config.settings.cache_enabled);
+    let runtime = Runtime::new(state, service, store, cache);
     runtime.run().await
+}
+
+/// Build the cache store; a disabled or undeterminable cache becomes a no-op.
+fn build_cache(enabled: bool) -> Arc<dyn CacheStore> {
+    match (enabled, FileCacheStore::default_path()) {
+        (true, Some(path)) => Arc::new(FileCacheStore::new(path)),
+        _ => Arc::new(NoopCache),
+    }
+}
+
+/// A cache that stores nothing — used when caching is disabled.
+struct NoopCache;
+impl CacheStore for NoopCache {
+    fn load(&self) -> Vec<github_status::ports::CachedProject> {
+        Vec::new()
+    }
+    fn save(
+        &self,
+        _: &[github_status::ports::CachedProject],
+    ) -> Result<(), github_status::ports::StoreError> {
+        Ok(())
+    }
 }
 
 fn resolve_config_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
