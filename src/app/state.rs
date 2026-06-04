@@ -18,12 +18,15 @@
 //! (failures floating up), the cursor stays put at its position instead of
 //! being dragged down with whatever row it started on.
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 
 use super::action::Action;
 use super::filter::Filter;
 use super::toast::{Toast, ToastKind};
 use crate::domain::{LoadState, PollIntervals, Project, ProjectStatus};
+use crate::ports::Clock;
 
 /// Side effects the runtime should perform after an update.
 #[derive(Debug, PartialEq, Eq)]
@@ -103,16 +106,20 @@ pub struct AppState {
     pub rate_limited_until: Option<DateTime<Utc>>,
     /// Set when run data changed and the cache should be re-persisted.
     pub cache_dirty: bool,
+    /// SSoT for "now" — injected so the reducer stays deterministic/testable.
+    clock: Arc<dyn Clock>,
 }
 
 impl AppState {
-    /// Build initial state from the configured projects.
-    pub fn new(projects: Vec<Project>) -> Self {
-        Self::with_intervals(projects, PollIntervals::default())
-    }
-
-    /// Build with explicit polling intervals (from config).
-    pub fn with_intervals(projects: Vec<Project>, intervals: PollIntervals) -> Self {
+    /// Build the application state. This is the canonical constructor: the
+    /// composition root injects the [`Clock`] (system clock in production, a
+    /// fixed clock in tests), so the reducer never reads the wall clock
+    /// directly — keeping it deterministic and the time source single.
+    pub fn with_config(
+        projects: Vec<Project>,
+        intervals: PollIntervals,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         Self {
             projects: projects.into_iter().map(ProjectStatus::new).collect(),
             selected: 0,
@@ -127,7 +134,13 @@ impl AppState {
             intervals,
             rate_limited_until: None,
             cache_dirty: false,
+            clock,
         }
+    }
+
+    /// The current time, sampled from the injected clock (SSoT for "now").
+    pub fn now(&self) -> DateTime<Utc> {
+        self.clock.now()
     }
 
     /// Hydrate already-loaded projects from cached snapshots (matched by slug).
@@ -320,7 +333,7 @@ impl AppState {
     /// due-times so the user always gets fresh data on demand, but still
     /// respects an active rate-limit cooldown.
     pub fn force_refresh_visible(&mut self) -> Command {
-        let now = Utc::now();
+        let now = self.now();
         if self.is_rate_limited(now) {
             self.toast = Some(Toast::warning("Rate limited — refresh paused briefly"));
             return Command::None;
@@ -351,7 +364,7 @@ impl AppState {
     /// their adaptive tier. Silent (no toast) since it runs on a timer.
     /// `is_due` already excludes in-flight projects.
     pub fn poll_due(&mut self) -> Command {
-        let now = Utc::now();
+        let now = self.now();
         if self.is_rate_limited(now) {
             return Command::None;
         }
@@ -502,7 +515,7 @@ impl AppState {
         index: usize,
         result: Result<Vec<crate::domain::WorkflowRun>, crate::ports::ProviderError>,
     ) -> Command {
-        let now = Utc::now();
+        let now = self.now();
         let mut rate_limited = false;
         if let Some(status) = self.projects.get_mut(index) {
             match result {
@@ -528,10 +541,13 @@ impl AppState {
         // A rate-limit response pauses *all* polling for a cooldown window so we
         // back off globally instead of hammering the API.
         if rate_limited {
-            self.rate_limited_until = Some(now + chrono::Duration::seconds(60));
-            self.toast = Some(Toast::warning(
-                "GitHub rate limit hit — pausing polling 60s",
-            ));
+            let cooldown = chrono::Duration::from_std(self.intervals.rate_limit_cooldown)
+                .unwrap_or_else(|_| chrono::Duration::seconds(60));
+            self.rate_limited_until = Some(now + cooldown);
+            self.toast = Some(Toast::warning(format!(
+                "GitHub rate limit hit — pausing polling {}s",
+                cooldown.num_seconds()
+            )));
         }
 
         // Re-sort once the whole batch settles so indices stay stable during
@@ -585,8 +601,18 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::FixedClock;
     use crate::domain::{RunState, WorkflowRun};
     use chrono::Utc;
+
+    /// Build state with a fixed clock so tests are deterministic.
+    fn app(projects: Vec<Project>) -> AppState {
+        AppState::with_config(
+            projects,
+            PollIntervals::default(),
+            Arc::new(FixedClock::new(Utc::now())),
+        )
+    }
 
     fn project(owner: &str, repo: &str) -> Project {
         Project::new(owner, repo)
@@ -608,7 +634,7 @@ mod tests {
 
     #[test]
     fn navigation_wraps_over_visible() {
-        let mut s = AppState::new(vec![project("a", "a"), project("b", "b")]);
+        let mut s = app(vec![project("a", "a"), project("b", "b")]);
         assert_eq!(s.selected, 0);
         s.update(Action::Up);
         assert_eq!(s.selected, 1);
@@ -619,7 +645,7 @@ mod tests {
     #[test]
     fn selection_is_stable_at_top_across_resort() {
         // Cursor at the top must NOT follow its project when the list reorders.
-        let mut s = AppState::new(vec![project("o", "ok"), project("o", "bad")]);
+        let mut s = app(vec![project("o", "ok"), project("o", "bad")]);
         assert_eq!(s.selected, 0);
         s.update(Action::Refresh);
         s.update(Action::FetchCompleted {
@@ -638,7 +664,7 @@ mod tests {
 
     #[test]
     fn refresh_marks_all_loading_and_counts_inflight() {
-        let mut s = AppState::new(vec![project("a", "a"), project("b", "b")]);
+        let mut s = app(vec![project("a", "a"), project("b", "b")]);
         let cmd = s.update(Action::Refresh);
         match cmd {
             Command::Fetch(targets) => assert_eq!(targets.len(), 2),
@@ -650,7 +676,7 @@ mod tests {
 
     #[test]
     fn poll_due_only_fetches_due_projects() {
-        let mut s = AppState::new(vec![project("a", "a"), project("b", "b")]);
+        let mut s = app(vec![project("a", "a"), project("b", "b")]);
         // Both idle → both due immediately.
         match s.poll_due() {
             Command::Fetch(t) => assert_eq!(t.len(), 2),
@@ -664,7 +690,7 @@ mod tests {
     fn manual_refresh_during_poll_does_not_double_fetch() {
         // Regression: pressing `r` while a poll is in flight must not re-fetch
         // the same projects (would waste API budget and inflate `inflight`).
-        let mut s = AppState::new(vec![project("a", "a"), project("b", "b")]);
+        let mut s = app(vec![project("a", "a"), project("b", "b")]);
         let cmd = s.poll_due(); // both now Loading, inflight = 2
         assert!(matches!(cmd, Command::Fetch(_)));
         assert_eq!(s.inflight, 2);
@@ -676,20 +702,43 @@ mod tests {
 
     #[test]
     fn rate_limit_pauses_polling() {
-        let mut s = AppState::new(vec![project("a", "a")]);
+        let mut s = app(vec![project("a", "a")]);
         s.update(Action::Refresh);
         s.update(Action::FetchCompleted {
             index: 0,
             result: Err(crate::ports::ProviderError::RateLimited("slow down".into())),
         });
-        assert!(s.is_rate_limited(Utc::now()));
+        assert!(s.is_rate_limited(s.now()));
         // While rate limited, polling yields nothing.
         assert_eq!(s.poll_due(), Command::None);
     }
 
     #[test]
+    fn rate_limit_cooldown_expires_after_configured_window() {
+        // Deterministic time: a FixedClock we can advance proves the cooldown
+        // ends exactly when configured — impossible to test with Utc::now().
+        let clock = FixedClock::new(Utc::now());
+        let intervals = PollIntervals::default();
+        let cooldown = intervals.rate_limit_cooldown;
+        let mut s =
+            AppState::with_config(vec![project("a", "a")], intervals, Arc::new(clock.clone()));
+        s.update(Action::Refresh);
+        s.update(Action::FetchCompleted {
+            index: 0,
+            result: Err(crate::ports::ProviderError::RateLimited("slow".into())),
+        });
+        assert!(s.is_rate_limited(s.now()));
+        // Just before the window ends: still paused.
+        clock.advance(chrono::Duration::from_std(cooldown).unwrap() - chrono::Duration::seconds(1));
+        assert!(s.is_rate_limited(s.now()));
+        // After the window: polling resumes.
+        clock.advance(chrono::Duration::seconds(2));
+        assert!(!s.is_rate_limited(s.now()));
+    }
+
+    #[test]
     fn failed_fetch_increments_backoff_counter() {
-        let mut s = AppState::new(vec![project("a", "a")]);
+        let mut s = app(vec![project("a", "a")]);
         s.update(Action::Refresh);
         s.update(Action::FetchCompleted {
             index: 0,
@@ -700,7 +749,7 @@ mod tests {
 
     #[test]
     fn successful_fetch_marks_cache_dirty_and_persists() {
-        let mut s = AppState::new(vec![project("a", "a")]);
+        let mut s = app(vec![project("a", "a")]);
         s.update(Action::Refresh);
         let cmd = s.update(Action::FetchCompleted {
             index: 0,
@@ -712,7 +761,7 @@ mod tests {
 
     #[test]
     fn delete_repo_needs_confirmation_then_persists() {
-        let mut s = AppState::new(vec![project("acme", "api"), project("acme", "web")]);
+        let mut s = app(vec![project("acme", "api"), project("acme", "web")]);
         // Request opens a prompt but changes nothing yet.
         s.update(Action::RequestDeleteRepo);
         assert!(s.pending_delete.is_some());
@@ -726,7 +775,7 @@ mod tests {
 
     #[test]
     fn cancel_delete_keeps_everything() {
-        let mut s = AppState::new(vec![project("acme", "api")]);
+        let mut s = app(vec![project("acme", "api")]);
         s.update(Action::RequestDeleteRepo);
         let cmd = s.update(Action::CancelDelete);
         assert_eq!(cmd, Command::None);
@@ -736,7 +785,7 @@ mod tests {
 
     #[test]
     fn delete_owner_removes_whole_company() {
-        let mut s = AppState::new(vec![
+        let mut s = app(vec![
             project("acme", "api"),
             project("acme", "web"),
             project("other", "x"),
@@ -757,7 +806,7 @@ mod tests {
 
     #[test]
     fn escape_cancels_pending_delete_first() {
-        let mut s = AppState::new(vec![project("acme", "api")]);
+        let mut s = app(vec![project("acme", "api")]);
         s.update(Action::RequestDeleteRepo);
         let cmd = s.update(Action::Escape);
         assert_eq!(cmd, Command::None);
@@ -767,7 +816,7 @@ mod tests {
 
     #[test]
     fn search_filters_visible_list() {
-        let mut s = AppState::new(vec![project("acme", "api"), project("other", "web")]);
+        let mut s = app(vec![project("acme", "api"), project("other", "web")]);
         s.update(Action::EnterSearch);
         for c in "acme".chars() {
             s.update(Action::SearchInput(c));
@@ -780,7 +829,7 @@ mod tests {
 
     #[test]
     fn owner_filter_limits_to_company() {
-        let mut s = AppState::new(vec![
+        let mut s = app(vec![
             project("acme", "api"),
             project("acme", "web"),
             project("other", "x"),
@@ -793,7 +842,7 @@ mod tests {
 
     #[test]
     fn escape_clears_filter_before_quitting() {
-        let mut s = AppState::new(vec![project("acme", "api")]);
+        let mut s = app(vec![project("acme", "api")]);
         s.filter.owner = Some("acme".into());
         let cmd = s.update(Action::Escape);
         assert_eq!(cmd, Command::None); // cleared filter, did not quit
@@ -805,7 +854,7 @@ mod tests {
 
     #[test]
     fn open_in_browser_yields_url_for_loaded_project() {
-        let mut s = AppState::new(vec![project("a", "a")]);
+        let mut s = app(vec![project("a", "a")]);
         s.update(Action::Refresh);
         s.update(Action::FetchCompleted {
             index: 0,
@@ -817,7 +866,7 @@ mod tests {
 
     #[test]
     fn toast_decays_on_tick() {
-        let mut s = AppState::new(vec![project("a", "a")]);
+        let mut s = app(vec![project("a", "a")]);
         s.toast = Some(Toast::info("hi"));
         for _ in 0..Toast::DEFAULT_TTL {
             s.update(Action::Tick);
@@ -827,7 +876,7 @@ mod tests {
 
     #[test]
     fn quit_stops_running() {
-        let mut s = AppState::new(vec![]);
+        let mut s = app(vec![]);
         let cmd = s.update(Action::Quit);
         assert_eq!(cmd, Command::Quit);
         assert!(!s.running);

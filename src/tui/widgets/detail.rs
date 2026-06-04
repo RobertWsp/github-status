@@ -27,7 +27,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, fo
 
     let lines = match selected {
         None => vec![Line::from(Span::styled("Nothing selected.", theme.dim()))],
-        Some(status) => detail_lines(status, theme),
+        Some(status) => detail_lines(status, theme, state.now()),
     };
 
     let para = Paragraph::new(lines)
@@ -36,7 +36,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, fo
     frame.render_widget(para, area);
 }
 
-fn detail_lines<'a>(status: &'a ProjectStatus, theme: &Theme) -> Vec<Line<'a>> {
+fn detail_lines<'a>(
+    status: &'a ProjectStatus,
+    theme: &Theme,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Line<'a>> {
     match &status.load {
         LoadState::Idle => vec![hint(theme, "Press 'r' to load this project.")],
         LoadState::Loading => vec![hint(theme, "Loading…")],
@@ -54,7 +58,7 @@ fn detail_lines<'a>(status: &'a ProjectStatus, theme: &Theme) -> Vec<Line<'a>> {
             }
             // Show how this project is being polled (adaptive tier) so the
             // cadence is transparent to the user.
-            let tier = status.poll_tier(chrono::Utc::now());
+            let tier = status.poll_tier(now);
             let mut lines = vec![
                 Line::from(vec![
                     Span::styled("Recent runs", theme.title()),

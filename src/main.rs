@@ -11,11 +11,11 @@ use std::sync::Arc;
 use clap::Parser;
 use color_eyre::eyre::{Result, WrapErr};
 
-use github_status::adapters::{FileCacheStore, FileProjectStore, GithubProvider};
+use github_status::adapters::{FileCacheStore, FileProjectStore, GithubProvider, SystemClock};
 use github_status::cli::{Cli, CommandKind};
 use github_status::commands;
 use github_status::config::Config;
-use github_status::ports::{CacheStore, ProjectStore, StatusProvider};
+use github_status::ports::{CacheStore, Clock, ProjectStore, StatusProvider};
 use github_status::tui::{Runtime, TerminalGuard};
 use github_status::{app::AppState, app::StatusService};
 
@@ -71,8 +71,10 @@ async fn run_tui(
     config_path: PathBuf,
 ) -> Result<()> {
     let projects = config.projects();
-    // Seed the state with the configured adaptive polling intervals.
-    let state = AppState::with_intervals(projects, config.settings.poll_intervals());
+    // Seed the state with the configured intervals and the system clock
+    // (the reducer reads time only through this injected clock).
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let state = AppState::with_config(projects, config.settings.poll_intervals(), clock);
     let service = StatusService::with_concurrency(
         provider,
         config.settings.runs_per_project,

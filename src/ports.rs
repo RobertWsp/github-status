@@ -5,8 +5,20 @@
 //! live in `adapters/` and are injected at the composition root (`main.rs`).
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
 use crate::domain::{Project, WorkflowRun};
+
+/// Source of the current time — the single source of truth for "now".
+///
+/// Injecting the clock (rather than calling `Utc::now()` ad hoc) keeps the
+/// application reducer deterministic and unit-testable: tests supply a fixed
+/// clock, production supplies [`crate::adapters::SystemClock`]. Every
+/// time-dependent decision in [`AppState`](crate::app::AppState) reads from
+/// here, so time is sampled in exactly one place per reduction.
+pub trait Clock: Send + Sync {
+    fn now(&self) -> DateTime<Utc>;
+}
 
 /// Errors a [`StatusProvider`] can surface, normalized away from any specific
 /// HTTP/client library so the app never depends on octocrab's error type.

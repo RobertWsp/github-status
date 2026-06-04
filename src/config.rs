@@ -48,6 +48,8 @@ pub struct Settings {
     pub poll_dormant_secs: u64,
     pub poll_backoff_base_secs: u64,
     pub poll_backoff_cap_secs: u64,
+    /// Seconds to pause all polling after a GitHub rate-limit response.
+    pub poll_rate_limit_cooldown_secs: u64,
     /// Personal access token. Prefer the `GITHUB_TOKEN` env var; this is a
     /// fallback for users who insist on storing it in the config file.
     pub token: Option<String>,
@@ -67,6 +69,7 @@ impl Default for Settings {
             poll_dormant_secs: p.dormant.as_secs(),
             poll_backoff_base_secs: p.backoff_base.as_secs(),
             poll_backoff_cap_secs: p.backoff_cap.as_secs(),
+            poll_rate_limit_cooldown_secs: p.rate_limit_cooldown.as_secs(),
             token: None,
         }
     }
@@ -82,6 +85,7 @@ impl Settings {
             dormant: Duration::from_secs(self.poll_dormant_secs.max(1)),
             backoff_base: Duration::from_secs(self.poll_backoff_base_secs.max(1)),
             backoff_cap: Duration::from_secs(self.poll_backoff_cap_secs.max(1)),
+            rate_limit_cooldown: Duration::from_secs(self.poll_rate_limit_cooldown_secs.max(1)),
         }
     }
 }

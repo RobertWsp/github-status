@@ -52,6 +52,8 @@ pub struct PollIntervals {
     pub dormant: Duration,
     pub backoff_base: Duration,
     pub backoff_cap: Duration,
+    /// How long to pause *all* polling after GitHub returns a rate-limit error.
+    pub rate_limit_cooldown: Duration,
 }
 
 impl Default for PollIntervals {
@@ -63,6 +65,7 @@ impl Default for PollIntervals {
             dormant: Duration::from_secs(1800),
             backoff_base: Duration::from_secs(30),
             backoff_cap: Duration::from_secs(900),
+            rate_limit_cooldown: Duration::from_secs(60),
         }
     }
 }

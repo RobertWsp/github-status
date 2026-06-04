@@ -110,6 +110,7 @@ poll_stable_secs = 300       # healthy & quiet
 poll_dormant_secs = 1800     # repo has no CI/CD at all
 poll_backoff_base_secs = 30  # error backoff base (doubles each failure)
 poll_backoff_cap_secs = 900  # error backoff ceiling
+poll_rate_limit_cooldown_secs = 60  # pause all polling after a rate-limit
 # token = "ghp_..."          # prefer the GITHUB_TOKEN env var instead
 
 [[project]]
@@ -175,8 +176,8 @@ Hexagonal (Ports & Adapters). Dependencies point **inward**; the pure
 | Module       | Responsibility                                                      |
 |--------------|---------------------------------------------------------------------|
 | `domain`     | Pure types & rules. SSoT for status semantics (`RunState`); `Project::parse`. |
-| `ports`      | The `StatusProvider`, `RepoDiscovery`, `ProjectStore` and `CacheStore` traits the app depends on. |
-| `adapters`   | octocrab provider (status + discovery), a `LocalGitScanner` reading `.git/config`, a `FileProjectStore` (config), and a `FileCacheStore` (run cache). |
+| `ports`      | The `StatusProvider`, `RepoDiscovery`, `ProjectStore`, `CacheStore` and `Clock` traits the app depends on. |
+| `adapters`   | octocrab provider (status + discovery), a `LocalGitScanner` reading `.git/config`, a `FileProjectStore` (config), a `FileCacheStore` (run cache), and `SystemClock`/`FixedClock`. |
 | `app`        | UI-agnostic state machine (`AppState`), actions, orchestration.     |
 | `tui`        | ratatui widgets + async runtime. `theme` is the SSoT for the palette. |
 | `cli`/`commands` | clap args + headless entry points (status / manage / import / doctor). |
@@ -223,6 +224,11 @@ writing one new adapter; nothing else changes.
   one refresh — never correctness.
 - **Rate-limit safety:** a `RateLimited` response sets a global cooldown that
   pauses all polling, and per-project errors trigger exponential backoff.
+- **Time as a port:** the reducer never calls `Utc::now()` directly — it reads
+  the injected `Clock` (`SystemClock` in production, `FixedClock` in tests).
+  "Now" is sampled once per reduction from a single source, keeping the state
+  machine deterministic and time-dependent logic (due-times, cooldowns)
+  unit-testable without sleeping.
 
 ## Development
 
