@@ -25,7 +25,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
 fn search_prompt<'a>(state: &'a AppState, theme: &Theme) -> Line<'a> {
     Line::from(vec![
         Span::styled(" / ", theme.key_hint()),
-        Span::styled(&state.query, theme.search_text()),
+        Span::styled(&state.filter.query, theme.search_text()),
         Span::styled("▏", theme.title()), // caret
         Span::styled(
             format!("    {} match(es)", state.visible_count()),

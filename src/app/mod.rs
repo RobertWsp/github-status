@@ -5,11 +5,13 @@
 //! reuse it unchanged.
 
 pub mod action;
+pub mod filter;
 pub mod service;
 pub mod state;
 pub mod toast;
 
 pub use action::Action;
+pub use filter::Filter;
 pub use service::StatusService;
 pub use state::{AppState, Command, InputMode, PendingDelete};
 pub use toast::{Toast, ToastKind};

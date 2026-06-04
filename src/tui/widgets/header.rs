@@ -34,12 +34,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
     }
 
     // Filter chips.
-    if let Some(owner) = &state.owner_filter {
+    if let Some(owner) = &state.filter.owner {
         spans.push(Span::raw("  "));
         spans.push(chip(theme, "owner", owner));
     }
-    let q = state.query.trim();
-    if !q.is_empty() {
+    if let Some(q) = state.filter.query_text() {
         spans.push(Span::raw("  "));
         spans.push(chip(theme, "search", q));
     }

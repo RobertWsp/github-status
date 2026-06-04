@@ -21,6 +21,7 @@
 use chrono::{DateTime, Utc};
 
 use super::action::Action;
+use super::filter::Filter;
 use super::toast::{Toast, ToastKind};
 use crate::domain::{LoadState, PollIntervals, Project, ProjectStatus};
 
@@ -82,10 +83,8 @@ pub struct AppState {
     pub selected: usize,
     /// Current input mode.
     pub mode: InputMode,
-    /// Active free-text search query (applies in both modes once non-empty).
-    pub query: String,
-    /// Active "show only this owner/company" filter.
-    pub owner_filter: Option<String>,
+    /// Active view filters (search query + owner). SSoT for visibility.
+    pub filter: Filter,
     /// Whether the help overlay is visible.
     pub show_help: bool,
     /// Set false to break the event loop.
@@ -118,8 +117,7 @@ impl AppState {
             projects: projects.into_iter().map(ProjectStatus::new).collect(),
             selected: 0,
             mode: InputMode::Normal,
-            query: String::new(),
-            owner_filter: None,
+            filter: Filter::default(),
             show_help: false,
             running: true,
             inflight: 0,
@@ -165,34 +163,40 @@ impl AppState {
 
     // --- Derived views (computed, never stored) ------------------------------
 
-    /// Physical indices of projects passing the active filters, in display
-    /// order. This is the projection the UI iterates over.
-    pub fn visible_indices(&self) -> Vec<usize> {
+    /// Iterator over the physical indices of projects passing the active
+    /// filters, in display order. Allocation-free — callers that need a `Vec`
+    /// can `.collect()`, but counting/nth/iteration stay zero-alloc.
+    pub fn visible(&self) -> impl Iterator<Item = usize> + '_ {
         self.projects
             .iter()
             .enumerate()
-            .filter(|(_, s)| self.passes_filters(&s.project))
+            .filter(|(_, s)| self.filter.passes(&s.project))
             .map(|(i, _)| i)
-            .collect()
     }
 
-    /// Number of currently visible projects.
+    /// Physical indices of visible projects as a `Vec` (when one is needed).
+    pub fn visible_indices(&self) -> Vec<usize> {
+        self.visible().collect()
+    }
+
+    /// Number of currently visible projects (no allocation).
     pub fn visible_count(&self) -> usize {
-        self.projects
-            .iter()
-            .filter(|s| self.passes_filters(&s.project))
-            .count()
+        self.visible().count()
+    }
+
+    /// Physical index of the `n`th visible project (no allocation).
+    pub fn nth_visible(&self, n: usize) -> Option<usize> {
+        self.visible().nth(n)
     }
 
     /// Whether any filter (search query or owner) is active.
     pub fn has_active_filter(&self) -> bool {
-        self.owner_filter.is_some() || !self.query.trim().is_empty()
+        self.filter.is_active()
     }
 
     /// The currently selected project status (resolving the visible index).
     pub fn selected_status(&self) -> Option<&ProjectStatus> {
-        let visible = self.visible_indices();
-        visible.get(self.selected).map(|&i| &self.projects[i])
+        self.nth_visible(self.selected).map(|i| &self.projects[i])
     }
 
     /// Whether any background fetch is currently running.
@@ -203,14 +207,6 @@ impl AppState {
     /// Whether the UI needs continuous repaint (spinner or live toast).
     pub fn needs_animation(&self) -> bool {
         self.is_loading() || self.toast.is_some()
-    }
-
-    fn passes_filters(&self, project: &Project) -> bool {
-        let owner_ok = self
-            .owner_filter
-            .as_deref()
-            .is_none_or(|o| project.belongs_to(o));
-        owner_ok && project.matches_query(&self.query)
     }
 
     // --- Reducer -------------------------------------------------------------
@@ -247,28 +243,27 @@ impl AppState {
             }
             Action::SearchInput(c) => {
                 if self.mode == InputMode::Search {
-                    self.query.push(c);
+                    self.filter.query.push(c);
                     self.clamp_selection();
                 }
                 Command::None
             }
             Action::SearchBackspace => {
                 if self.mode == InputMode::Search {
-                    self.query.pop();
+                    self.filter.query.pop();
                     self.clamp_selection();
                 }
                 Command::None
             }
             Action::ConfirmSearch => {
                 self.mode = InputMode::Normal;
-                if self.query.trim().is_empty() {
-                    self.query.clear();
-                } else {
-                    self.toast = Some(Toast::info(format!(
-                        "Filtering by \"{}\" — {} match(es)",
-                        self.query.trim(),
-                        self.visible_count()
-                    )));
+                match self.filter.query_text() {
+                    None => self.filter.query.clear(),
+                    Some(q) => {
+                        let msg =
+                            format!("Filtering by \"{q}\" — {} match(es)", self.visible_count());
+                        self.toast = Some(Toast::info(msg));
+                    }
                 }
                 self.clamp_selection();
                 Command::None
@@ -276,8 +271,7 @@ impl AppState {
             Action::FilterSelectedOwner => self.filter_selected_owner(),
             Action::ClearFilters => {
                 let had = self.has_active_filter();
-                self.query.clear();
-                self.owner_filter = None;
+                self.filter.clear();
                 self.mode = InputMode::Normal;
                 self.clamp_selection();
                 if had {
@@ -331,9 +325,19 @@ impl AppState {
             self.toast = Some(Toast::warning("Rate limited — refresh paused briefly"));
             return Command::None;
         }
-        let targets: Vec<usize> = self.visible_indices();
+        // Skip anything already in flight so a manual refresh during a poll
+        // doesn't double-fetch (wasting API budget / corrupting `inflight`).
+        let targets: Vec<usize> = self
+            .visible()
+            .filter(|&i| !matches!(self.projects[i].load, LoadState::Loading))
+            .collect();
         if targets.is_empty() {
-            self.toast = Some(Toast::warning("Nothing visible to refresh"));
+            let msg = if self.is_loading() {
+                "Already refreshing…"
+            } else {
+                "Nothing visible to refresh"
+            };
+            self.toast = Some(Toast::warning(msg));
             return Command::None;
         }
         self.toast = Some(Toast::info(format!(
@@ -345,14 +349,14 @@ impl AppState {
 
     /// Scheduler-driven poll: fetch only visible projects that are *due* by
     /// their adaptive tier. Silent (no toast) since it runs on a timer.
+    /// `is_due` already excludes in-flight projects.
     pub fn poll_due(&mut self) -> Command {
         let now = Utc::now();
         if self.is_rate_limited(now) {
             return Command::None;
         }
         let targets: Vec<usize> = self
-            .visible_indices()
-            .into_iter()
+            .visible()
             .filter(|&i| self.projects[i].is_due(&self.intervals, now))
             .collect();
         if targets.is_empty() {
@@ -363,10 +367,16 @@ impl AppState {
 
     /// Mark the given physical indices as loading, stamp the attempt time, and
     /// emit a [`Command::Fetch`] carrying the `(index, project)` pairs.
+    ///
+    /// Defensive: skips any index already `Loading` so `inflight` can't be
+    /// inflated by overlapping callers (the invariant the spinner relies on).
     fn start_fetch(&mut self, indices: Vec<usize>, now: DateTime<Utc>) -> Command {
         let mut targets = Vec::with_capacity(indices.len());
         for i in indices {
             if let Some(s) = self.projects.get_mut(i) {
+                if matches!(s.load, LoadState::Loading) {
+                    continue;
+                }
                 s.load = LoadState::Loading;
                 s.last_attempt_at = Some(now);
                 targets.push((i, s.project.clone()));
@@ -393,7 +403,7 @@ impl AppState {
     fn filter_selected_owner(&mut self) -> Command {
         if let Some(status) = self.selected_status() {
             let owner = status.project.owner.clone();
-            self.owner_filter = Some(owner.clone());
+            self.filter.owner = Some(owner.clone());
             self.selected = 0;
             self.clamp_selection();
             self.toast = Some(Toast::new(
@@ -452,9 +462,9 @@ impl AppState {
         }
 
         // Owner filter may now match nothing; drop it to avoid an empty list.
-        if let Some(owner) = &self.owner_filter {
+        if let Some(owner) = &self.filter.owner {
             if !self.projects.iter().any(|s| s.project.belongs_to(owner)) {
-                self.owner_filter = None;
+                self.filter.owner = None;
             }
         }
         self.clamp_selection();
@@ -651,6 +661,20 @@ mod tests {
     }
 
     #[test]
+    fn manual_refresh_during_poll_does_not_double_fetch() {
+        // Regression: pressing `r` while a poll is in flight must not re-fetch
+        // the same projects (would waste API budget and inflate `inflight`).
+        let mut s = AppState::new(vec![project("a", "a"), project("b", "b")]);
+        let cmd = s.poll_due(); // both now Loading, inflight = 2
+        assert!(matches!(cmd, Command::Fetch(_)));
+        assert_eq!(s.inflight, 2);
+        // Manual refresh finds nothing not-already-loading.
+        let cmd = s.force_refresh_visible();
+        assert_eq!(cmd, Command::None);
+        assert_eq!(s.inflight, 2); // unchanged — no double fetch
+    }
+
+    #[test]
     fn rate_limit_pauses_polling() {
         let mut s = AppState::new(vec![project("a", "a")]);
         s.update(Action::Refresh);
@@ -762,7 +786,7 @@ mod tests {
             project("other", "x"),
         ]);
         // Select the "other" project then filter to acme via a different one.
-        s.owner_filter = Some("acme".into());
+        s.filter.owner = Some("acme".into());
         s.clamp_selection();
         assert_eq!(s.visible_count(), 2);
     }
@@ -770,10 +794,10 @@ mod tests {
     #[test]
     fn escape_clears_filter_before_quitting() {
         let mut s = AppState::new(vec![project("acme", "api")]);
-        s.owner_filter = Some("acme".into());
+        s.filter.owner = Some("acme".into());
         let cmd = s.update(Action::Escape);
         assert_eq!(cmd, Command::None); // cleared filter, did not quit
-        assert!(s.owner_filter.is_none());
+        assert!(s.filter.owner.is_none());
         assert!(s.running);
         let cmd = s.update(Action::Escape); // now quits
         assert_eq!(cmd, Command::Quit);
